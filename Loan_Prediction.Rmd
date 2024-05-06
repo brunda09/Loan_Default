@@ -1,0 +1,444 @@
+---
+title: "Untitled"
+author: "Brunda Uppalapati"
+date: "2023-12-01"
+output: pdf_document
+---
+
+```{r}
+rm(list = ls())
+
+```
+
+
+```{r}
+# Comparing models
+# Load required libraries
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(rpart)
+library(glmnet)
+library(corrplot)
+library(readxl)
+library(pROC)
+```
+
+
+```{r}
+# Load the loan dataset
+loan <- read_excel("C:/Users/bruva/OneDrive/Documents/CDA/czech financial dataset/loan.xlsx")
+client <- read_excel("C:/Users/bruva/OneDrive/Documents/CDA/czech financial dataset/client.xlsx")
+account <- read_excel("C:/Users/bruva/OneDrive/Documents/CDA/czech financial dataset/account.xlsx")
+card <- read_excel("C:/Users/bruva/OneDrive/Documents/CDA/czech financial dataset/card.xlsx")
+disp <- read_excel("C:/Users/bruva/OneDrive/Documents/CDA/czech financial dataset/disp.xlsx")
+order <- read_excel("C:/Users/bruva/OneDrive/Documents/CDA/czech financial dataset/order.xlsx")
+trans <- read_excel("C:/Users/bruva/OneDrive/Documents/CDA/czech financial dataset/trans.xlsx")
+district <- read_excel("C:/Users/bruva/OneDrive/Documents/CDA/czech financial dataset/district.xlsx")
+
+```
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+
+#View(district)
+# Rename a column
+district <- district %>% rename(district_id = A1)
+#View(district)
+```
+
+
+```{r}
+# Merge dataframes
+merged_data <- left_join(loan, order, by = "account_id") %>% 
+  left_join(., trans, by = "account_id") %>%
+  left_join(., account, by = "account_id") %>% 
+  left_join(., district, by = "district_id")
+#View(merged_data)
+```
+
+
+```{r}
+# Check for columns with more than 50% missing values
+na_threshold <- 0.5
+columns_with_na <- colnames(merged_data)[colMeans(is.na(merged_data)) > na_threshold]
+
+# Print columns with more than 50% missing values
+if (length(columns_with_na) > 0) {
+  cat("Columns with more than 50% missing values:", paste(columns_with_na, collapse = ", "), "\n")
+} else {
+  cat("No columns with more than 50% missing values.\n")
+}
+```
+
+
+```{r}
+merged_data <- merged_data %>%
+  select(-one_of(columns_with_na))
+#View(merged_data)
+
+# Handle missing values, duplicates, and perform data transformation
+merged_data <- merged_data %>%
+  distinct() %>%
+  na.omit()
+```
+
+
+```{r}
+#convert status column to binary
+merged_data$status <- ifelse(merged_data$status %in% c("B", "D"), 1, 0)
+table(merged_data$status)
+
+#convert categorical columns to numeric
+merged_data$k_symbol.x <- as.numeric(factor(merged_data$k_symbol.x))
+merged_data$type <- as.numeric(factor(merged_data$type))
+merged_data$operation <- as.numeric(factor(merged_data$operation))
+merged_data$frequency <- as.numeric(factor(merged_data$frequency))
+merged_data$bank_to <- as.numeric(factor(merged_data$bank_to))
+
+```
+
+
+```{r}
+library(ggplot2)
+
+# Create a bar chart
+bar_chart <- ggplot(merged_data, aes(x = factor(status), fill = factor(status))) +
+  geom_bar() +
+  labs(title = "Distribution of Defaulters and Non-Defaulters",
+       x = "Default Status",
+       y = "Count") +
+  scale_fill_manual(values = c("0" = "blue", "1" = "red"), labels = c("Non-Defaulter", "Defaulter")) +
+  theme_minimal()
+
+# Show the bar chart
+print(bar_chart)
+
+```
+
+
+```{r}
+# Identify numeric columns
+numeric_columns <- sapply(merged_data, is.numeric)
+
+# Exclude 'status' column from normalization
+numeric_columns <- numeric_columns & colnames(merged_data) != "status"
+
+# Normalize numeric columns
+merged_data[, numeric_columns] <- scale(merged_data[, numeric_columns])
+
+```
+
+
+```{r}
+library(ROSE)
+
+under_sampled_data <- ovun.sample(status ~ ., data = merged_data, method = "under", N = 2 * sum(merged_data$status == 1))
+
+# The resulting under_sampled_data is a list, and you can access the undersampled data using:
+under_sampled_data <- under_sampled_data$data
+#View(under_sampled_data)
+table(under_sampled_data$status)
+
+#Create bar chart
+bar_chart <- ggplot(under_sampled_data, aes(x = factor(status), fill = factor(status))) +
+  geom_bar() +
+  labs(title = "Distribution of Defaulters and Non-Defaulters",
+       x = "Default Status",
+       y = "Count") +
+  scale_fill_manual(values = c("0" = "blue", "1" = "red"), labels = c("Non-Defaulter", "Defaulter")) +
+  theme_minimal()
+
+# Show the bar chart
+print(bar_chart)
+```
+
+
+```{r}
+numeric_data <- select_if(under_sampled_data, is.numeric)
+
+```
+
+
+```{r}
+# Get accuracy for entire dataset
+# Split the dataset into training and testing sets
+set.seed(123)
+train_index <- createDataPartition(under_sampled_data$status, p = 0.8, list = FALSE)
+train_data <- under_sampled_data[train_index, ]
+test_data <- under_sampled_data[-train_index, ]
+
+```
+
+
+```{r}
+# Model Development
+
+# 1. Pick all features in the dataset
+# Logistic Regression Model
+logistic_model <- glm(status ~ ., data = train_data, family = "binomial")
+
+glm_probabilities <- predict(logistic_model, test_data, type = "response")
+glm_predictions_binary <- ifelse(glm_probabilities > 0.5, 1, 0)
+
+# Evaluate the model
+glm_conf_matrix1 <- confusionMatrix(as.factor(glm_predictions_binary),as.factor(test_data$status))
+print(glm_conf_matrix1)
+
+accuracy <- glm_conf_matrix1$overall[1]
+cat("Accuracy:", accuracy * 100, "\n")
+```
+
+
+```{r}
+# Random Forest
+rf_model <- randomForest(status ~ ., data = train_data, method = "class")
+
+rf_predictions <- predict(rf_model, test_data, type = "response")
+rf_predictions_binary <- ifelse(rf_predictions > 0.5, 1, 0)
+
+# Evaluate the model
+rf_conf_matrix1 <- confusionMatrix(as.factor(rf_predictions_binary),as.factor(test_data$status))
+print(rf_conf_matrix1)
+
+accuracy <- rf_conf_matrix1$overall[1]
+cat("Accuracy:", accuracy * 100, "\n")
+
+```
+
+
+```{r}
+# 2. Lets pick certain features based on correlation matrix and get accuracy based on those features
+# Calculate the correlation matrix
+correlation_matrix <- cor(numeric_data)
+
+#corrplot(correlation_matrix, method = "circle", type = "upper", tl.cex = 0.7)
+corrplot(correlation_matrix, method = "color", type = "upper", order = "hclust",tl.col = "black",tl.cex = 0.7)
+
+# Logistic Regression Model
+logistic_model2 <- glm(status ~ amount.x+payments+A6+A7+balance+k_symbol.x, data = train_data, family = "binomial")
+
+glm_probabilities2 <- predict(logistic_model2, test_data, type = "response")
+glm_predictions_binary2 <- ifelse(glm_probabilities2 > 0.5, 1, 0)
+
+# Evaluate the model
+glm_conf_matrix2 <- confusionMatrix(as.factor(glm_predictions_binary2),as.factor(test_data$status))
+print(glm_conf_matrix2)
+
+accuracy <- glm_conf_matrix2$overall[1]
+cat("Accuracy:", accuracy * 100, "\n")
+
+```
+
+
+```{r}
+# Random Forest
+rf_model2 <- randomForest(status ~ amount.x+payments+A6+A7+balance+k_symbol.x, data = train_data, method = "class")
+
+rf_predictions2 <- predict(rf_model2, test_data, type = "response")
+rf_predictions_binary2 <- ifelse(rf_predictions2 > 0.5, 1, 0)
+
+# Evaluate the model
+rf_conf_matrix2 <- confusionMatrix(as.factor(rf_predictions_binary2),as.factor(test_data$status))
+print(rf_conf_matrix2)
+
+accuracy <- rf_conf_matrix2$overall[1]
+cat("Accuracy:", accuracy * 100, "\n")
+```
+
+
+```{r}
+# 3. Lets apply LASSO and get accuracy based on those features
+
+# Install and load the necessary library
+library(glmnet)
+
+# Function to calculate accuracy
+calculate_accuracy <- function(predictions, true_labels) {
+  glm_conf_matrix3 <- confusionMatrix(as.factor(predictions), as.factor(true_labels))
+
+  return(glm_conf_matrix3$overall[1])
+}
+
+# Function to plot coefficients from the LASSO model
+plot_lasso_coefficients <- function(lasso_model, title) {
+  plot(lasso_model, xvar = "lambda", label = TRUE)
+  title(main = title)
+}
+
+# Function to train and evaluate LASSO model
+train_and_evaluate_lasso <- function(train_data, test_data) {
+  # Train LASSO model
+  lasso_model <- cv.glmnet(as.matrix(train_data %>% select(amount.x,payments,A6,A7,balance,k_symbol.x)), train_data$status, alpha = 1)
+ # lasso_model <- cv.glmnet(as.matrix(train_data %>% select(-status)), train_data$status, alpha = 1)
+  
+  # Find the optimal lambda
+  best_lambda <- lasso_model$lambda.min
+  
+  # Make predictions on the test set
+  lasso_predictions <- predict(lasso_model, newx = as.matrix(test_data %>% select(amount.x,payments,A6,A7,balance,k_symbol.x)), s = best_lambda, type = "response")
+  #lasso_predictions <- predict(lasso_model, newx = as.matrix(test_data %>% select(-status)), s = best_lambda, type = "response")
+  
+  lasso_predictions_binary <- ifelse(lasso_predictions > 0.5, 1, 0)
+  
+  # Evaluate the model
+  accuracy <- calculate_accuracy(lasso_predictions_binary, test_data$status)
+  cat("LASSO Accuracy:", accuracy * 100, "\n")
+  
+  # Get selected features
+  selected_features <- coef(lasso_model, s = best_lambda)
+  selected_feature_indices <- which(selected_features != 0)
+  
+  cat("Selected Features:", names(train_data)[-1][selected_feature_indices], "\n")
+  
+  # Plot LASSO coefficients
+  plot_lasso_coefficients(lasso_model, "LASSO Coefficients")
+  
+  return(list(predictions = lasso_predictions_binary, model = lasso_model, features= selected_features))
+}
+
+```
+
+
+```{r}
+# Train and evaluate LASSO model
+lasso_results <- train_and_evaluate_lasso(train_data, test_data)
+lasso_predictions <- lasso_results$predictions
+```
+
+
+```{r}
+# Create a new dataset with only the selected features
+selected_feature_indices <- which(lasso_results$features != 0)
+lasso_selected_data <- cbind(train_data$status, train_data[, selected_feature_indices])
+lasso_selected_test_data <- cbind(test_data$status, test_data[, selected_feature_indices])
+
+# Random Forest using features from LASSO
+rf_model_lasso <- randomForest(status ~ ., data = lasso_selected_data[,-1], method = "class")
+
+# Make predictions on the test set
+rf_predictions_lasso <- predict(rf_model_lasso, lasso_selected_test_data[,-1], type = "response")
+rf_predictions_binary_lasso <- ifelse(rf_predictions_lasso > 0.5, 1, 0)
+
+# Evaluate the model
+rf_conf_matrix_lasso <- confusionMatrix(as.factor(rf_predictions_binary_lasso), as.factor(test_data$status))
+print(rf_conf_matrix_lasso)
+
+accuracy <- rf_conf_matrix_lasso$overall[1]
+cat("Accuracy:", accuracy * 100, "\n")
+```
+
+
+```{r}
+#ROC Curves
+plot_roc_curve <- function(true_labels, predicted_probs, model_name, plot_legend = TRUE) {
+  roc_data <- roc(true_labels, predicted_probs)
+  auc_value <- auc(roc_data)
+  
+  ggroc(roc_data) +
+    geom_segment(aes(x = 1, y = 0, xend = 0, yend = 1 - auc_value),
+                 linetype = "dashed", color = "red") +
+    annotate("text", x = 0.2, y = 0.8, label = paste("AUC =", round(auc_value, 2)),
+             color = "red", size = 4) +
+    labs(title = paste("ROC Curve -", model_name),
+         x = "False Positive Rate",
+         y = "True Positive Rate") +
+    theme_minimal() +
+   
+    if (plot_legend) {
+      theme(legend.position="bottom")
+    } else {
+      theme(legend.position="none")
+    }
+}
+
+```
+
+
+```{r}
+# Plot ROC curve for Logistic Regression Model 1
+plot_roc_curve(test_data$status, glm_probabilities, "Logistic Regression Model 1")
+
+# Plot ROC curve for Random Forest Model 1
+plot_roc_curve(test_data$status, rf_predictions, "Random Forest Model 1")
+
+# Plot ROC curve for Logistic Regression Model 2
+plot_roc_curve(test_data$status, glm_probabilities2, "Logistic Regression Model 2")
+
+# Plot ROC curve for Random Forest Model 2
+plot_roc_curve(test_data$status, rf_predictions2, "Random Forest Model 2")
+
+# Plot ROC curve for Logistic Regression Model 3
+plot_roc_curve(test_data$status, lasso_predictions, "LASSO Regression Model")
+
+# Plot ROC curve for Random Forest Model 3
+plot_roc_curve(test_data$status, rf_predictions_lasso, "Random Forest Model 3")
+```
+
+
+```{r}
+# Function to calculate cost-based confusion matrix
+calculate_cost_confusion_matrix <- function(predictions, true_labels, cost_fp, cost_fn) {
+  confusion_matrix <- confusionMatrix(as.factor(predictions), as.factor(true_labels))
+  
+  # Extract confusion matrix values
+  tp <- confusion_matrix$table[2, 2]
+  tn <- confusion_matrix$table[1, 1]
+  fp <- confusion_matrix$table[1, 2]
+  fn <- confusion_matrix$table[2, 1]
+  
+  # Calculate cost-based metrics
+  total_cost <- (cost_fp * fp) + (cost_fn * fn)
+  
+  cat("True Positives:", tp, "\n")
+  cat("True Negatives:", tn, "\n")
+  cat("False Positives:", fp, "\n")
+  cat("False Negatives:", fn, "\n")
+  cat("Total Cost:", total_cost, "\n")
+  
+  return(confusion_matrix)
+}
+```
+
+
+```{r}
+# Set your cost values
+cost_fp <- 5  # Cost of a false positive
+cost_fn <- 10   # Cost of a false negative
+
+# Calculate cost-based confusion matrix for Logistic Regression Model 1
+cost_conf_matrix_lr1 <- calculate_cost_confusion_matrix(glm_predictions_binary, test_data$status, cost_fp, cost_fn)
+print(cost_conf_matrix_lr1)
+```
+
+
+```{r}
+# Calculate cost-based confusion matrix for Random Forest Model 1
+cost_conf_matrix_rf1 <- calculate_cost_confusion_matrix(rf_predictions_binary, test_data$status, cost_fp, cost_fn)
+print(cost_conf_matrix_rf1)
+```
+
+
+```{r}
+# Calculate cost-based confusion matrix for Logistic Regression Model 2
+cost_conf_matrix_lr2 <- calculate_cost_confusion_matrix(glm_predictions_binary2, test_data$status, cost_fp, cost_fn)
+print(cost_conf_matrix_lr2)
+```
+
+
+```{r}
+# Calculate cost-based confusion matrix for Random Forest Model 2
+cost_conf_matrix_rf2 <- calculate_cost_confusion_matrix(rf_predictions_binary2, test_data$status, cost_fp, cost_fn)
+print(cost_conf_matrix_rf2)
+```
+
+
+```{r}
+# Calculate cost-based confusion matrix for LASSO Regression Model 
+cost_conf_matrix_lasso <- calculate_cost_confusion_matrix(lasso_predictions, test_data$status, cost_fp, cost_fn)
+print(cost_conf_matrix_lasso)
+```
+
